@@ -207,7 +207,7 @@ const ZForth = struct {
             return ZfError.DstackOverrun;
         }
 
-        self.dstack[@intCast(u32, self.dsp)] = cell;
+        self.dstack[@intCast(usize, self.dsp)] = cell;
         self.dsp += 1;
     }
 
@@ -216,9 +216,9 @@ const ZForth = struct {
             return ZfError.DstackUnderrun;
         }
         self.dsp -= 1;
-        const addr_u32 = @intCast(u32, self.dsp);
+        const addr_usize = @intCast(usize, self.dsp);
 
-        return self.dstack[addr_u32];
+        return self.dstack[addr_usize];
     }
 
     pub fn pick(self: *ZForth, n: ZfAddr) ZfError!ZfCell {
@@ -230,7 +230,7 @@ const ZForth = struct {
             return ZfError.RstackOverrun;
         }
 
-        self.rstack[@intCast(u32, self.rsp)] = value;
+        self.rstack[@intCast(usize, self.rsp)] = value;
         self.rsp += 1;
     }
 
@@ -240,11 +240,11 @@ const ZForth = struct {
         }
 
         self.rsp -= 1;
-        return self.rstack[@intCast(u32, self.rsp)];
+        return self.rstack[@intCast(usize, self.rsp)];
     }
 
     pub fn rpick(self: *ZForth, n: ZfAddr) ZfError!ZfCell {
-        return self.rstack[@intCast(u32, self.rsp - n - 1)];
+        return self.rstack[@intCast(usize, self.rsp - n - 1)];
     }
 
     pub fn dict_put_bytes(self: *ZForth, addr: ZfAddr, buf: []const u8) ZfError!void {
@@ -254,8 +254,8 @@ const ZForth = struct {
     }
 
     pub fn dict_get_bytes(self: *ZForth, addr: ZfAddr, buf: []u8) ZfError!void {
-        const addr_u32 = @intCast(u32, addr);
-        var dict = self.dict[addr_u32 .. addr_u32 + buf.len];
+        const addr_usize = @intCast(usize, addr);
+        var dict = self.dict[addr_usize .. addr_usize + buf.len];
 
         for (dict) |elem, index| {
             buf[index] = elem;
@@ -266,50 +266,50 @@ const ZForth = struct {
         if (addr < 0) {
             return ZfError.OutOfBounds;
         }
-        return self.dict[@intCast(u32, addr)];
+        return self.dict[@intCast(usize, addr)];
     }
 
     pub fn dict_put_byte(self: *ZForth, addr: ZfAddr, value: u8) ZfError!void {
         if (addr < 0) {
             return ZfError.OutOfBounds;
         }
-        self.dict[@intCast(u32, addr)] = value;
+        self.dict[@intCast(usize, addr)] = value;
     }
 
     pub fn dict_get_cell(self: *ZForth, addr: ZfAddr) !ZfCell {
         if (addr < 0) {
             return ZfError.OutOfBounds;
         }
-        const addr_u32 = @intCast(u32, addr);
-        return @ptrCast(*align(1) ZfCell, &self.dict[addr_u32]).*;
+        const addr_usize = @intCast(usize, addr);
+        return @ptrCast(*align(1) ZfCell, &self.dict[addr_usize]).*;
     }
 
     pub fn dict_put_cell(self: *ZForth, addr: ZfAddr, value: ZfCell) ZfError!void {
         if (addr < 0) {
             return ZfError.OutOfBounds;
         }
-        const addr_u32 = @intCast(u32, addr);
-        @ptrCast(*align(1) ZfCell, &self.dict[addr_u32]).* = value;
+        const addr_usize = @intCast(usize, addr);
+        @ptrCast(*align(1) ZfCell, &self.dict[addr_usize]).* = value;
     }
 
     pub fn dict_add_byte(self: *ZForth, byte: u8) ZfError!void {
         const here_ptr = self.here();
-        const addr_u32 = @intCast(u32, self.here().*);
-        self.dict[addr_u32] = byte;
+        const addr_usize = @intCast(usize, self.here().*);
+        self.dict[addr_usize] = byte;
         self.here().* += @sizeOf(u8);
     }
 
     pub fn dict_add_cell(self: *ZForth, value: ZfCell) ZfError!void {
         const here_ptr = self.here();
-        const addr_u32 = @intCast(u32, here_ptr.*);
-        @ptrCast(*align(1) ZfCell, &self.dict[addr_u32]).* = value;
+        const addr_usize = @intCast(usize, here_ptr.*);
+        @ptrCast(*align(1) ZfCell, &self.dict[addr_usize]).* = value;
         self.here().* += @sizeOf(ZfCell);
     }
 
     pub fn dict_add_op(self: *ZForth, op: ZfAddr) ZfError!void {
         const here_ptr = self.here();
-        const addr_u32 = @intCast(u32, here_ptr.*);
-        @ptrCast(*align(1) ZfAddr, &self.dict[addr_u32]).* = op;
+        const addr_usize = @intCast(usize, here_ptr.*);
+        @ptrCast(*align(1) ZfAddr, &self.dict[addr_usize]).* = op;
         self.here().* += @sizeOf(ZfAddr);
     }
 
@@ -347,7 +347,7 @@ const ZForth = struct {
 
             const link = try self.dict_get_cell(current_word + 1);
 
-            const name_offset = @intCast(u32, current_word + 1 + @sizeOf(ZfCell));
+            const name_offset = @intCast(usize, current_word + 1 + @sizeOf(ZfCell));
             const word_name = self.dict[name_offset .. name_offset + name_len];
             const words_eql = std.mem.eql(u8, name, word_name);
             if (words_eql) {
@@ -364,8 +364,8 @@ const ZForth = struct {
     }
 
     pub fn make_immediate(self: *ZForth) void {
-        const flags = self.dict[@intCast(u32, self.latest().*)];
-        self.dict[@intCast(u32, self.latest().*)] = flags | @enumToInt(ZfFlags.Immediate);
+        const flags = self.dict[@intCast(usize, self.latest().*)];
+        self.dict[@intCast(usize, self.latest().*)] = flags | @enumToInt(ZfFlags.Immediate);
     }
 
     /// Inner interpreter. This steps the machine forward, executing the next
