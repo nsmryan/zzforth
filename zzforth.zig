@@ -28,6 +28,8 @@
 // Zig testing is like Rust testing- its great. Zig seems to compile and run very fast
 // for this small project.
 // Instead of cargo watch, I've been using entr on WSL on Windows 10.
+// occasionally this causes some kind of issue where a file isn't found or it
+// gets stuck.
 //
 // A lot of error handling is not yet checked
 
@@ -42,7 +44,9 @@ const assert = std.debug.assert;
 //
 
 // zfconfig.h
-const ZfAddr = u32;
+const ZfCell = u32;
+
+const ZfAddr = ZfCell;
 
 const ZF_RSTACK_SIZE: u32 = 4096;
 const ZF_DSTACK_SIZE: u32 = 4096;
@@ -51,7 +55,7 @@ const ZF_DICT_SIZE: u32 = 4096;
 const ZF_NUM_USER_VARS: u32 = 5;
 
 const ZF_MAX_NAME_LEN: u32 = 31;
-const ZF_INPUT_BUFFER_SIZE: u32 = 32;
+const ZF_INPUT_BUFFER_SIZE: u32 = 80;
 
 // TODO this could be a bit field instead of mask and shift
 const ZF_FLAG_LEN_MASK: u8 = 0x1F;
@@ -65,7 +69,7 @@ const ZfInputState = enum {
     Interpret, PassChar, PassWord
 };
 
-const ZfSysCallId = enum {
+const ZfSysCallId = enum(ZfCell) {
     Emit, Print, Tell, User = 128
 };
 
@@ -129,12 +133,11 @@ const ZfPrim = enum(ZfAddr) {
 //    "h", "latest", "trace", "compiling", "postpone",
 //};
 
-const ZfCell = u32;
-
 const ZForth = struct {
     rstack: [ZF_RSTACK_SIZE]ZfCell = undefined,
     dstack: [ZF_DSTACK_SIZE]ZfCell = undefined,
     dict: [ZF_DICT_SIZE]u8 = undefined,
+
     input_buffer: [ZF_INPUT_BUFFER_SIZE]u8 = undefined,
     input_len: ZfCell = 0,
 
@@ -157,32 +160,46 @@ const ZForth = struct {
         return zforth;
     }
 
+    // TODO seems like there should be a nicer way to do this
     pub fn here(self: *ZForth) *align(1) ZfCell {
-        return @ptrCast(*align(1) ZfCell, &self.dict[0]);
+        var dict_ptr = @ptrCast([*]align(1) ZfCell, &self.dict);
+        return &dict_ptr[0];
     }
 
     pub fn latest(self: *ZForth) *align(1) ZfCell {
-        return @ptrCast(*align(1) ZfCell, &self.dict[1]);
+        var dict_ptr = @ptrCast([*]align(1) ZfCell, &self.dict);
+        return &dict_ptr[1];
     }
 
     pub fn trace(self: *ZForth) *align(1) ZfCell {
-        return @ptrCast(*align(1) ZfCell, &self.dict[2]);
+        var dict_ptr = @ptrCast([*]align(1) ZfCell, &self.dict);
+        return &dict_ptr[2];
     }
 
     pub fn compiling(self: *ZForth) *align(1) ZfCell {
-        return @ptrCast(*align(1) ZfCell, &self.dict[3]);
+        var dict_ptr = @ptrCast([*]align(1) ZfCell, &self.dict);
+        return &dict_ptr[3];
     }
 
     pub fn postpone(self: *ZForth) *align(1) ZfCell {
-        return @ptrCast(*align(1) ZfCell, &self.dict[4]);
+        var dict_ptr = @ptrCast([*]align(1) ZfCell, &self.dict);
+        return &dict_ptr[4];
     }
 
     pub fn push(self: *ZForth, cell: ZfCell) ZfError!void {
+        if (self.dsp == ZF_DSTACK_SIZE) {
+            return ZfError.DstackOverrun;
+        }
+
         self.dstack[self.dsp] = cell;
         self.dsp += 1;
     }
 
     pub fn pop(self: *ZForth) ZfError!ZfCell {
+        if (self.dsp == 0) {
+            return ZfError.DstackUnderrun;
+        }
+
         self.dsp -= 1;
         return self.dstack[self.dsp];
     }
@@ -192,11 +209,19 @@ const ZForth = struct {
     }
 
     pub fn rpush(self: *ZForth, value: ZfCell) ZfError!void {
+        if (self.rsp == ZF_RSTACK_SIZE) {
+            return ZfError.RstackOverrun;
+        }
+
         self.rstack[self.rsp] = value;
         self.rsp += 1;
     }
 
     pub fn rpop(self: *ZForth) ZfError!ZfCell {
+        if (self.rsp == 0) {
+            return ZfError.RstackUnderrun;
+        }
+
         self.rsp -= 1;
         return self.rstack[self.rsp];
     }
@@ -268,7 +293,6 @@ const ZForth = struct {
         self.latest().* = here_prev;
     }
 
-    // TODO seems like this could return ?{ ZfAddr, ZfAddr } or something
     pub fn find_word(self: *ZForth, name: []const u8, addr: *ZfAddr, code: *ZfAddr) ZfError!bool {
         var word = self.latest().*;
 
@@ -282,7 +306,8 @@ const ZForth = struct {
 
             const name_offset = current_word + 1 + @sizeOf(ZfCell);
             const word_name = self.dict[name_offset .. name_offset + name_len];
-            if (std.mem.eql(u8, name, word_name)) {
+            const words_eql = std.mem.eql(u8, name, word_name);
+            if (words_eql) {
                 addr.* = word;
                 code.* = name_offset + name_len;
 
@@ -295,12 +320,12 @@ const ZForth = struct {
         return false;
     }
 
-    pub fn make_immediate(self: *ZForth) ZfError!void {
+    pub fn make_immediate(self: *ZForth) void {
         const flags = self.dict[self.latest().*];
-        try self.dict_put_cell(self.latest().*, flags | @enumToInt(ZfFlags.Immediate));
+        self.dict[self.latest().*] = flags | @enumToInt(ZfFlags.Immediate);
     }
 
-    pub fn run(self: *ZForth, input_buf: ?[]const u8) ZfError!void {
+    pub fn run(self: *ZForth, input_buf: ?[]const u8) ZfError!?ZfSysCallId {
         var input = input_buf;
         while (self.ip != 0) {
             const ip_orig = self.ip;
@@ -310,30 +335,32 @@ const ZForth = struct {
             self.ip += @sizeOf(ZfCell);
 
             if (code <= @typeInfo(ZfPrim).Enum.fields.len) {
-                try self.do_prim(@intToEnum(ZfPrim, code), input);
+                const syscall = try self.do_prim(@intToEnum(ZfPrim, code), input);
 
                 if (self.input_state != ZfInputState.Interpret) {
                     self.ip = ip_orig;
-                    break;
+                    return syscall;
                 }
             } else {
                 try self.rpush(self.ip);
                 self.ip = code;
             }
+
+            // TODO why do we null input here?
+            input = null;
         }
 
-        // TODO why do we null input here?
-        input = null;
+        return null;
     }
 
-    pub fn execute(self: *ZForth, addr: ZfAddr) ZfError!void {
+    pub fn execute(self: *ZForth, addr: ZfAddr) ZfError!?ZfSysCallId {
         self.ip = addr;
         self.rsp = 0;
         try self.rpush(0);
-        try self.run(null);
+        return try self.run(null);
     }
 
-    pub fn do_prim(self: *ZForth, op: ZfPrim, input: ?[]const u8) ZfError!void {
+    pub fn do_prim(self: *ZForth, op: ZfPrim, input: ?[]const u8) ZfError!?ZfSysCallId {
         switch (op) {
             .Exit => {
                 self.ip = try self.rpop();
@@ -412,7 +439,7 @@ const ZForth = struct {
             },
 
             .Immediate => {
-                try self.make_immediate();
+                self.make_immediate();
             },
 
             .Peek => {
@@ -494,15 +521,17 @@ const ZForth = struct {
             },
 
             .Sys => {
-                const value = self.pop();
-                self.input_state = self.host_sys(value, input);
-                if (self.input_state != ZfInputState.Interpret) {
-                    try self.push(value);
-                }
+                const value = try self.pop();
+                return @intToEnum(ZfSysCallId, value);
+
+                //self.input_state = self.host_sys(value, input);
+                //if (self.input_state != ZfInputState.Interpret) {
+                //    try self.push(value);
+                //}
             },
 
             .Pick => {
-                const addr = self.pop();
+                const addr = try self.pop();
                 const value = try self.pick(addr);
                 try self.push(value);
             },
@@ -513,18 +542,18 @@ const ZForth = struct {
             },
 
             .Key => {
-                if (!input) {
-                    self.input_state = ZfInputState.PassChar;
+                if (input) |buf| {
+                    try self.push(buf[0]);
                 } else {
-                    try self.push(input[0]);
+                    self.input_state = ZfInputState.PassChar;
                 }
             },
 
             .Lits => {
                 // TODO what does lits do?
-                const value = self.dict_get_cell(self.ip);
-                self.push(self.ip);
-                self.push(value);
+                const value = try self.dict_get_cell(self.ip);
+                try self.push(self.ip);
+                try self.push(value);
                 self.ip += @sizeOf(ZfCell);
             },
 
@@ -533,16 +562,19 @@ const ZForth = struct {
             },
 
             .And => {
-                self.push(self.pop & self.pop());
+                const value1 = try self.pop();
+                const value2 = try self.pop();
+                try self.push(value1 & value2);
             },
         }
+
+        return null;
     }
 
-    pub fn handle_word(self: *ZForth, input: []const u8) ZfError!void {
+    pub fn handle_word(self: *ZForth, input: []const u8) ZfError!?ZfSysCallId {
         if (self.input_state == ZfInputState.PassWord) {
             self.input_state = ZfInputState.Interpret;
-            try self.run(input);
-            return;
+            return try self.run(input);
         }
 
         var word_addr: ZfAddr = undefined;
@@ -564,7 +596,7 @@ const ZForth = struct {
 
                 self.postpone().* = 0;
             } else {
-                try self.execute(code_addr);
+                return try self.execute(code_addr);
             }
         } else {
             const num = try parse_num(input);
@@ -575,98 +607,112 @@ const ZForth = struct {
                 try self.push(num);
             }
         }
+
+        return null;
     }
 
-    pub fn handle_char(self: *ZForth, chr: u8) ZfError!void {
+    pub fn handle_char(self: *ZForth, chr: u8) ZfError!?ZfSysCallId {
         if (self.input_state == ZfInputState.PassChar) {
             self.input_state = ZfInputState.Interpret;
             const chr_buf = [_]u8{chr};
-            try self.run(chr_buf[0..1]);
+
+            return try self.run(chr_buf[0..1]);
         } else if (chr != 0 and !std.ascii.isSpace(chr)) {
             if (self.input_len < ZF_INPUT_BUFFER_SIZE - 1) {
                 self.input_buffer[self.input_len] = chr;
                 self.input_len += 1;
                 self.input_buffer[self.input_len] = 0;
             }
+            // TODO else return an error that the buffer is full?
+            //      or is this handled by the runner?
         } else {
+            // chr is 0 or space
             if (self.input_len > 0) {
+                const word = self.input_buffer[0..self.input_len];
                 self.input_len = 0;
-                try self.handle_word(self.input_buffer[0..]);
+                return try self.handle_word(word);
             }
         }
+
+        return null;
     }
 
     // NOTE in zForth, these bootstrap functions are optional based on a
     // preprocessor directive
     // NOTE in zForh, a leading underscore is used instead of the 'immediate' flag
     fn add_prim(self: *ZForth, name: []const u8, op: ZfPrim, immediate: bool) ZfError!void {
-        self.create_word(name, ZfFlags.Prim);
-        self.dict_add_op(op);
-        self.dict_add_op(ZfPrim.Exit);
+        try self.create_word(name, ZfFlags.Prim);
+        try self.dict_add_op(@enumToInt(op));
+        try self.dict_add_op(@enumToInt(ZfPrim.Exit));
         if (immediate) {
             self.make_immediate();
         }
     }
 
-    fn add_uservar(name: []const u8, addr: ZfAddr) ZfError!void {
-        self.create_word(name, ZfFlags.None);
-        self.dict_add_lit(addr);
-        self.dict_add_op(ZfPrim.Exit);
+    fn add_uservar(self: *ZForth, name: []const u8, addr: ZfAddr) ZfError!void {
+        try self.create_word(name, ZfFlags.None);
+        try self.dict_add_lit(addr);
+        try self.dict_add_op(@enumToInt(ZfPrim.Exit));
     }
 
     pub fn bootstrap(self: *ZForth) ZfError!void {
-        self.add_prim("exit", ZfPrim.Exit, false);
-        self.add_prim("lit", ZfPrim.Lit, false);
-        self.add_prim("ltz", ZfPrim.Ltz, false);
-        self.add_prim("col", ZfPrim.Col, true);
-        self.add_prim("semicol", ZfPrim.Semicol, false);
-        self.add_prim("add", ZfPrim.Add, false);
-        self.add_prim("sub", ZfPrim.Sub, false);
-        self.add_prim("mul", ZfPrim.Mul, false);
-        self.add_prim("div", ZfPrim.Div, false);
-        self.add_prim("mod", ZfPrim.Mod, false);
-        self.add_prim("drop", ZfPrim.Drop, false);
-        self.add_prim("dup", ZfPrim.Dup, false);
-        self.add_prim("pickr", ZfPrim.Pickr, false);
-        self.add_prim("immediate", ZfPrim.Immediate, true);
-        self.add_prim("peek", ZfPrim.Peek, false);
-        self.add_prim("poke", ZfPrim.Poke, false);
-        self.add_prim("swap", ZfPrim.Swap, false);
-        self.add_prim("rot", ZfPrim.Rot, false);
-        self.add_prim("jmp", ZfPrim.Jmp, false);
-        self.add_prim("jmp0", ZfPrim.Jmp0, false);
-        self.add_prim("tick", ZfPrim.Tick, false);
-        self.add_prim("comment", ZfPrim.Comment, true);
-        self.add_prim("pushr", ZfPrim.Pushr, false);
-        self.add_prim("popr", ZfPrim.Popr, false);
-        self.add_prim("equal", ZfPrim.Equal, false);
-        self.add_prim("sys", ZfPrim.Sys, false);
-        self.add_prim("pick", ZfPrim.Pick, false);
-        self.add_prim("comma", ZfPrim.Comma, false);
-        self.add_prim("key", ZfPrim.Key, false);
-        self.add_prim("lits", ZfPrim.Lits, false);
-        self.add_prim("len", ZfPrim.Len, false);
-        self.add_prim("and", ZfPrim.And, false);
+        try self.add_prim("exit", ZfPrim.Exit, false);
+        try self.add_prim("lit", ZfPrim.Lit, false);
+        try self.add_prim("ltz", ZfPrim.Ltz, false);
+        try self.add_prim(":", ZfPrim.Col, true);
+        try self.add_prim(";", ZfPrim.Semicol, true);
+        try self.add_prim("+", ZfPrim.Add, false);
+        try self.add_prim("-", ZfPrim.Sub, false);
+        try self.add_prim("*", ZfPrim.Mul, false);
+        try self.add_prim("/", ZfPrim.Div, false);
+        try self.add_prim("%", ZfPrim.Mod, false);
+        try self.add_prim("drop", ZfPrim.Drop, false);
+        try self.add_prim("dup", ZfPrim.Dup, false);
+        try self.add_prim("pickr", ZfPrim.Pickr, false);
+        try self.add_prim("immediate", ZfPrim.Immediate, true);
+        try self.add_prim("peek", ZfPrim.Peek, false);
+        try self.add_prim("poke", ZfPrim.Poke, false);
+        try self.add_prim("swap", ZfPrim.Swap, false);
+        try self.add_prim("rot", ZfPrim.Rot, false);
+        try self.add_prim("jmp", ZfPrim.Jmp, false);
+        try self.add_prim("jmp0", ZfPrim.Jmp0, false);
+        try self.add_prim("'", ZfPrim.Tick, false);
+        try self.add_prim("(", ZfPrim.Comment, true);
+        try self.add_prim("pushr", ZfPrim.Pushr, false);
+        try self.add_prim("popr", ZfPrim.Popr, false);
+        try self.add_prim("=", ZfPrim.Equal, false);
+        try self.add_prim("sys", ZfPrim.Sys, false);
+        try self.add_prim("pick", ZfPrim.Pick, false);
+        try self.add_prim(",", ZfPrim.Comma, false);
+        try self.add_prim("key", ZfPrim.Key, false);
+        try self.add_prim("lits", ZfPrim.Lits, false);
+        try self.add_prim("len", ZfPrim.Len, false);
+        try self.add_prim("&", ZfPrim.And, false);
 
-        self.add_uservar("here", 0 * @sizeOf(ZfCell));
-        self.add_uservar("latest", 1 * @sizeOf(ZfCell));
-        self.add_uservar("trace", 2 * @sizeOf(ZfCell));
-        self.add_uservar("compiling", 3 * @sizeOf(ZfCell));
-        self.add_uservar("postpone", 4 * @sizeOf(ZfCell));
+        try self.add_uservar("here", 0 * @sizeOf(ZfCell));
+        try self.add_uservar("latest", 1 * @sizeOf(ZfCell));
+        try self.add_uservar("trace", 2 * @sizeOf(ZfCell));
+        try self.add_uservar("compiling", 3 * @sizeOf(ZfCell));
+        try self.add_uservar("postpone", 4 * @sizeOf(ZfCell));
     }
 
-    // TODO this should return ZfResult, or merged with ZfError
-    pub fn eval(self: *ZForth, buffer: []const u8) ZfError!void {
-        for (buffer) |chr| {
+    pub fn eval(self: *ZForth, input: []const u8) ZfError!?ZfSysCallId {
+        for (input) |chr| {
             // handle each character, but if there is an error
             // then reset the system and return it.
-            self.handle_char(chr) catch |err| {
+            const syscall = self.handle_char(chr) catch |err| {
                 self.compiling().* = 0;
                 self.rsp = 0;
                 self.dsp = 0;
                 return err;
             };
+
+            if (syscall) |id| {
+                return id;
+            }
         }
+
+        return null;
     }
 };
 
@@ -738,15 +784,32 @@ test "zforth add word" {
     // if the word isn't in the dictionary, we don't find it
     assert(!try zforth.find_word("notname", &addr, &code));
 
-    try zforth.make_immediate();
+    zforth.make_immediate();
     assert(zforth.dict[addr] & @enumToInt(ZfFlags.Immediate) != 0);
 }
 
-test "zforth eval" {
+test "zforth simple eval" {
     var zforth = ZForth.init();
 
-    const prog = "1 2 +";
-    try zforth.eval(prog);
+    try zforth.bootstrap();
 
-    assert(zforth.dstack[0] == 3);
+    // TODO the final space is currently necessary
+    const prog = "1 2 + ";
+    _ = try zforth.eval(prog);
+
+    const result = try zforth.pop();
+    assert(result == 3);
+}
+
+test "zforth complex eval" {
+    var zforth = ZForth.init();
+
+    try zforth.bootstrap();
+
+    // TODO the final space is currently necessary
+    const prog = ": add_one 1 + ; 10 add_one ";
+    _ = try zforth.eval(prog);
+
+    const result = try zforth.pop();
+    assert(result == 11);
 }
