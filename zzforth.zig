@@ -48,11 +48,22 @@ const ZfCell = u32;
 
 const ZfAddr = ZfCell;
 
+// TODO these could be provided as arguments to ZForth
 const ZF_RSTACK_SIZE: u32 = 4096;
 const ZF_DSTACK_SIZE: u32 = 4096;
 const ZF_DICT_SIZE: u32 = 4096;
 
+comptime {
+    // The dictionary should be an integer number of cells.
+    assert(ZF_DICT_SIZE % @sizeOf(ZfCell) == 0);
+}
+
 const ZF_NUM_USER_VARS: u32 = 5;
+
+comptime {
+    // The dictionary should be large enough to hold the user variables.
+    assert(@sizeOf([ZF_NUM_USER_VARS]ZfCell) < ZF_DICT_SIZE);
+}
 
 const ZF_MAX_NAME_LEN: u32 = 31;
 const ZF_INPUT_BUFFER_SIZE: u32 = 80;
@@ -701,9 +712,7 @@ const ZForth = struct {
             // handle each character, but if there is an error
             // then reset the system and return it.
             const syscall = self.handle_char(chr) catch |err| {
-                self.compiling().* = 0;
-                self.rsp = 0;
-                self.dsp = 0;
+                self.reset();
                 return err;
             };
 
@@ -712,7 +721,20 @@ const ZForth = struct {
             }
         }
 
+        // feed in another 0. In C this is the NULL terminator, but with Zig slices
+        // we know the exact length, so finish off the input if it ends in a word.
+        const syscall = self.handle_char(0) catch |err| {
+            self.reset();
+            return err;
+        };
+
         return null;
+    }
+
+    pub fn reset(self: *ZForth) void {
+        self.compiling().* = 0;
+        self.rsp = 0;
+        self.dsp = 0;
     }
 };
 
@@ -793,8 +815,7 @@ test "zforth simple eval" {
 
     try zforth.bootstrap();
 
-    // TODO the final space is currently necessary
-    const prog = "1 2 + ";
+    const prog = "1 2 +";
     _ = try zforth.eval(prog);
 
     const result = try zforth.pop();
@@ -806,8 +827,7 @@ test "zforth complex eval" {
 
     try zforth.bootstrap();
 
-    // TODO the final space is currently necessary
-    const prog = ": add_one 1 + ; 10 add_one ";
+    const prog = ": add_one 1 + ; 10 add_one";
     _ = try zforth.eval(prog);
 
     const result = try zforth.pop();
